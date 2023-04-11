@@ -32,12 +32,12 @@ class IncrementalPDP(BaseIncrementalExplainer):
         self.pdp_x_tracker = MultiValueTracker(copy.deepcopy(base_tracker))
         self.ice_curves_y = deque()
         self.ice_curves_x = deque()
+        self.fi_list = []
         self.seen_samples = 0
         self.storage = storage
         # TODO - Remove this
         self.storage_size = storage_size
         self.waiting_period = 20
-
 
     def _add_ice_curve_to_pdp(self, ice_curve_y, ice_curve_x):
         self.pdp_y_tracker.update(ice_curve_y)
@@ -76,6 +76,7 @@ class IncrementalPDP(BaseIncrementalExplainer):
                 predictions_dict[i] = prediction
             self._add_ice_curve_to_pdp(ice_curve_y=predictions_dict, ice_curve_x=feature_grid_dict)
             self._add_ice_curve_to_storage(ice_curve_y=predictions_dict, ice_curve_x=feature_grid_dict)
+            self.fi_list.append(np.std(list(self.pdp_y_tracker.get().values())))
             self.storage.update(x=x_i)
             self.seen_samples += 1
 
@@ -101,6 +102,18 @@ class IncrementalPDP(BaseIncrementalExplainer):
         xlim_upper = np.max(list(self.pdp_x_tracker.get().values())) * 1.05
         plt.xlim((xlim_lower, xlim_upper))
         plt.show()
+
+    def plot_feature_importance(self, title=None):
+        if title is None:
+            title = f"PDP Feature Importance Curve for feature {self.pdp_feature}"
+
+        fig, axis = plt.subplots(1, 1)
+        axis.plot(range(len(self.fi_list)), self.fi_list, ls='-', c='black', alpha=1, linewidth=2)
+        plt.title(title)
+        plt.xlabel(f"feature: {self.pdp_feature}")
+        plt.ylabel("PDP Feature Importance")
+        plt.show()
+
 
     # def plot_ice_curve(self, ice_curve_y, ice_curve_x, feature_name, title: str = None):
     #     if title is None:
@@ -165,9 +178,11 @@ class BatchPDP:
 
         ice_curves_x = np.asarray(self.ice_curves_x)
         mean_x = np.mean(ice_curves_x, axis=0)
+        # TODO - make this a separate function
+        self.pdp_x_values = mean_x
         ice_curves_y = np.asarray(self.ice_curves_y)
         mean_y = np.mean(ice_curves_y, axis=0)
-
+        self.pdp_y_values = mean_y
         alphas = [0.5] * len(self.ice_curves_x)
 
         fig, axis = plt.subplots(1, 1)
@@ -184,6 +199,96 @@ class BatchPDP:
         xlim_upp = np.max(mean_x) * 1.05
         plt.xlim((xlim_low, xlim_upp))
         plt.show()
+
+    @staticmethod
+    def _calculate_percentage_overlap(range1, range2):
+        """Calculate the percentage overlap between two ranges"""
+        # Find the minimum and maximum values of the overlap between the two ranges
+        overlap_min = max(range1[0], range2[0])
+        overlap_max = min(range1[1], range2[1])
+        # If there is no overlap, return 0%
+
+        if overlap_min >= overlap_max:
+            return 0
+
+
+
+        # Calculate the length of the overlap and the lengths of each range
+        overlap_length = overlap_max - overlap_min
+        range1_length = range1[1] - range1[0]
+        range2_length = range2[1] - range2[0]
+
+        # Calculate the percentage overlap
+        # TODO - check denominator
+        percentage = (overlap_length / min(range1_length, range2_length)) * 100
+
+        if percentage == 0:
+            overlap_range = None
+        else:
+            overlap_range = (overlap_min,overlap_max)
+
+        return percentage, overlap_range
+
+    @staticmethod
+    def _area_between_curves(x_coords, y_coords1, y_coords2):
+        # Calculate the area between the two curves using the trapezoidal rule.
+        area = 0
+        for i in range(len(x_coords) - 1):
+            height1 = y_coords1[i]
+            height2 = y_coords2[i]
+            width = x_coords[i + 1] - x_coords[i]
+            area += 0.5 * width * (height1 + height2)
+
+        return abs(area)
+
+
+
+    def calculate_similarity_and_overlap_score(self, incremental_explainer):
+        inc_pdp_x = np.array(list(incremental_explainer.pdp_x_tracker.get().values()))
+        inc_pdp_y = np.array(list(incremental_explainer.pdp_y_tracker.get().values()))
+        #print(self.pdp_x_values)
+        #print(self.pdp_y_values)
+        batch_pdp_range = (np.min(self.pdp_x_values),np.max(self.pdp_x_values))
+        inc_pdp_range = (np.min(inc_pdp_x), np.max(inc_pdp_x))
+        overlap_percentage, overlap_range = self._calculate_percentage_overlap(batch_pdp_range, inc_pdp_range)
+
+        area_overlap = 0
+        if overlap_percentage != 0:
+            if overlap_range is not None:
+                inc_pdp_x = inc_pdp_x[np.where((inc_pdp_x >= overlap_range[0]) & (inc_pdp_x <= overlap_range[1]))]
+
+            print(inc_pdp_x)
+            new_y_values = np.interp(inc_pdp_x,self.pdp_x_values,self.pdp_y_values)
+            distance = np.abs(new_y_values - inc_pdp_y)
+
+            # TODO - Confirm choice of distance measure
+            mean_distance = np.mean(distance)
+            # OR
+            area_overlap = self._area_between_curves(inc_pdp_x, new_y_values, inc_pdp_y)
+
+            # x_min = inc_pdp_range[0]
+            # x_max = inc_pdp_range[1]
+            #
+            # def integrand(y1, y2):
+            #     return np.abs(y1 - y2)
+            #
+            # # Integrate the absolute difference between the curves
+            # area_overlap = quad(integrand, x_min, x_max, args=(new_y_values, inc_pdp_y))
+
+        return overlap_percentage, area_overlap
+
+    @staticmethod
+    def plot_similarity_metrics(x_val, y_val, title=None):
+        if title is None:
+            title = "Similarity Measure"
+        fig, axis = plt.subplots(1, 1)
+        axis.plot(x_val, y_val, ls='-', c='red', alpha=1., linewidth=2)
+        plt.title(title)
+        plt.xlabel(f"Iteration")
+        plt.ylabel("Similarity Measure")
+        plt.show()
+
+
 
 
 # class IncrementalPDP(BaseIncrementalExplainer):
